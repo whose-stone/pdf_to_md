@@ -3,3 +3,15 @@
 
 # Local env file — contains API keys. Template is at .env.example.
 .env
+
+# Local PDF inputs and generated Markdown outputs
+/input/
+/output/
+
+# PyInstaller build artifacts
+/build/
+/dist/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
