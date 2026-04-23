@@ -1,0 +1,17 @@
+[llm]
+# Any OpenAI-compatible endpoint.
+# Cloud example: https://api.openai.com/v1
+# Local example (Ollama/OpenWebUI/vLLM): http://localhost:11434/v1
+base_url = "https://generativelanguage.googleapis.com"
+
+# Use any model available at your endpoint.
+model = "gemini-3.1-flash-lite-preview"
+
+# Key source; useful for switching providers without editing this file.
+api_key_env = "AIzaSyA9-KTzmgXK9hdGRSf8yUi5CSIAzksXYzA"
+
+temperature = 0.0
+max_tokens = 18000
+enabled = true
+describe_images = true
+postprocess_layout = true
