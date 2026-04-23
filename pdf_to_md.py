@@ -19,6 +19,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
+from dotenv import load_dotenv
+
 
 @dataclass
 class LLMConfig:
@@ -218,6 +220,8 @@ def convert_pdf(pdf_path: Path, config: LLMConfig) -> str:
 
 
 def main() -> int:
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Convert a PDF into readable Markdown with optional LLM post-processing.")
     parser.add_argument("pdf_path", type=Path, help="Path to the source PDF file")
     parser.add_argument("-o", "--output", type=Path, help="Output markdown file path (default: same name with .md)")
