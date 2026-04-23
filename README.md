@@ -24,7 +24,7 @@ Example `config.toml`:```toml
 [llm]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"
+api_key_env = "LLM_API_KEY"
 temperature = 0.0
 max_tokens = 800
 enabled = true

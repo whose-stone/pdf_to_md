@@ -45,14 +45,14 @@ def load_config(path: Path | None) -> LLMConfig:
         return LLMConfig(
             model=os.environ.get("PDF_TO_MD_MODEL", "gpt-4.1-mini"),
             base_url=os.environ.get("PDF_TO_MD_BASE_URL", "https://api.openai.com/v1"),
-            api_key=os.environ.get("OPENAI_API_KEY"),
+            api_key=os.environ.get("LLM_API_KEY"),
         )
 
     with cfg_path.open("rb") as f:
         data = tomllib.load(f)
 
     llm = data.get("llm", {})
-    api_key_env = llm.get("api_key_env", "OPENAI_API_KEY")
+    api_key_env = llm.get("api_key_env", "LLM_API_KEY")
     return LLMConfig(
         model=llm.get("model", os.environ.get("PDF_TO_MD_MODEL", "gpt-4.1-mini")),
         base_url=llm.get("base_url", os.environ.get("PDF_TO_MD_BASE_URL", "https://api.openai.com/v1")),

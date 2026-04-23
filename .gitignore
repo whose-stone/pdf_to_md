@@ -1,0 +1,2 @@
+# Local config — contains API keys. Template is at examples/config.toml.
+/config.toml
