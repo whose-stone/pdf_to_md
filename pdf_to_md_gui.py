@@ -40,6 +40,7 @@ DEFAULT_PROFILE: dict = {
     "model": "gpt-4.1-mini",
     "temperature": 0.0,
     "max_tokens": 800,
+    "max_concurrency": 5,
     "enabled": True,
     "describe_images": True,
     "postprocess_layout": True,
@@ -82,6 +83,7 @@ class App:
         self.model = StringVar(value=profile["model"])
         self.temperature = StringVar(value=str(profile["temperature"]))
         self.max_tokens = StringVar(value=str(profile["max_tokens"]))
+        self.max_concurrency = StringVar(value=str(profile["max_concurrency"]))
         self.enabled = BooleanVar(value=profile["enabled"])
         self.describe_images = BooleanVar(value=profile["describe_images"])
         self.postprocess_layout = BooleanVar(value=profile["postprocess_layout"])
@@ -136,14 +138,17 @@ class App:
         ttk.Label(llm, text="Max tokens:").grid(row=4, column=0, sticky="w", **pad)
         ttk.Entry(llm, textvariable=self.max_tokens, width=10).grid(row=4, column=1, sticky="w", **pad)
 
+        ttk.Label(llm, text="Max concurrency:").grid(row=5, column=0, sticky="w", **pad)
+        ttk.Entry(llm, textvariable=self.max_concurrency, width=10).grid(row=5, column=1, sticky="w", **pad)
+
         ttk.Checkbutton(llm, text="Enable LLM calls", variable=self.enabled).grid(
-            row=5, column=0, columnspan=3, sticky="w", **pad
-        )
-        ttk.Checkbutton(llm, text="Describe images", variable=self.describe_images).grid(
             row=6, column=0, columnspan=3, sticky="w", **pad
         )
-        ttk.Checkbutton(llm, text="Postprocess layout", variable=self.postprocess_layout).grid(
+        ttk.Checkbutton(llm, text="Describe images", variable=self.describe_images).grid(
             row=7, column=0, columnspan=3, sticky="w", **pad
+        )
+        ttk.Checkbutton(llm, text="Postprocess layout", variable=self.postprocess_layout).grid(
+            row=8, column=0, columnspan=3, sticky="w", **pad
         )
 
         # Action buttons
@@ -206,6 +211,14 @@ class App:
         except ValueError:
             messagebox.showerror("Invalid input", "Max tokens must be an integer.")
             return None
+        try:
+            max_concurrency = int(self.max_concurrency.get())
+        except ValueError:
+            messagebox.showerror("Invalid input", "Max concurrency must be an integer.")
+            return None
+        if max_concurrency < 1:
+            messagebox.showerror("Invalid input", "Max concurrency must be at least 1.")
+            return None
 
         return {
             "input_dir": self.input_dir.get().strip(),
@@ -215,6 +228,7 @@ class App:
             "model": self.model.get().strip(),
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "max_concurrency": max_concurrency,
             "enabled": self.enabled.get(),
             "describe_images": self.describe_images.get(),
             "postprocess_layout": self.postprocess_layout.get(),
@@ -259,6 +273,7 @@ class App:
             enabled=data["enabled"],
             describe_images=data["describe_images"],
             postprocess_layout=data["postprocess_layout"],
+            max_concurrency=data["max_concurrency"],
         )
 
         self.convert_btn.configure(state="disabled", text="Converting…")
