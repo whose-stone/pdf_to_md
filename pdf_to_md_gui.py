@@ -155,10 +155,22 @@ class App:
         self.convert_btn = ttk.Button(actions, text="Convert", command=self._on_convert)
         self.convert_btn.grid(row=0, column=1, sticky="e")
 
+        # Progress
+        progress_frame = ttk.Frame(frame)
+        progress_frame.grid(row=3, column=0, columnspan=3, sticky="ew", **pad)
+        progress_frame.columnconfigure(0, weight=1)
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(
+            progress_frame, variable=self.progress_var, maximum=100, mode="determinate"
+        )
+        self.progress_bar.grid(row=0, column=0, sticky="ew")
+        self.progress_label = ttk.Label(progress_frame, text="Idle")
+        self.progress_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+
         # Log area
         log_frame = ttk.LabelFrame(frame, text="Log", padding=6)
-        log_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", **pad)
-        frame.rowconfigure(3, weight=1)
+        log_frame.grid(row=4, column=0, columnspan=3, sticky="nsew", **pad)
+        frame.rowconfigure(4, weight=1)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
@@ -260,31 +272,70 @@ class App:
             pdfs = sorted(p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
             if not pdfs:
                 self._log(f"No PDFs found in {input_dir}")
+                self._set_progress(0, 1, "No PDFs found")
                 return
 
-            output_dir.mkdir(parents=True, exist_ok=True)
-            self._log(f"Found {len(pdfs)} PDF(s). Writing to {output_dir}")
+            import fitz
 
-            failures = 0
+            page_counts: dict[Path, int] = {}
+            total_pages = 0
             for pdf in pdfs:
-                out_path = output_dir / (pdf.stem + ".md")
-                self._log(f"Converting {pdf.name} -> {out_path.name}")
                 try:
-                    markdown = pdf_to_md.convert_pdf(pdf, cfg)
+                    with fitz.open(pdf) as doc:
+                        page_counts[pdf] = doc.page_count
+                        total_pages += doc.page_count
+                except Exception as exc:
+                    self._log(f"  Could not open {pdf.name} to count pages: {exc}")
+                    page_counts[pdf] = 0
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self._log(f"Found {len(pdfs)} PDF(s), {total_pages} page(s). Writing to {output_dir}")
+            self._set_progress(0, max(total_pages, 1), f"Starting {len(pdfs)} PDF(s)…")
+
+            completed_pages = 0
+            failures = 0
+            for pdf_idx, pdf in enumerate(pdfs, start=1):
+                out_path = output_dir / (pdf.stem + ".md")
+                self._log(f"[{pdf_idx}/{len(pdfs)}] Converting {pdf.name} -> {out_path.name}")
+                base = completed_pages
+
+                def on_page(idx: int, total: int, _pdf=pdf, _base=base) -> None:
+                    self._set_progress(
+                        _base + idx,
+                        max(total_pages, 1),
+                        f"[{pdf_idx}/{len(pdfs)}] {_pdf.name}: page {idx}/{total}",
+                    )
+
+                try:
+                    markdown = pdf_to_md.convert_pdf(pdf, cfg, on_page=on_page)
                     out_path.write_text(markdown, encoding="utf-8")
                     self._log(f"  OK: {out_path}")
                 except Exception as exc:
                     failures += 1
                     self._log(f"  FAILED: {exc}")
 
+                completed_pages += page_counts.get(pdf, 0)
+                self._set_progress(completed_pages, max(total_pages, 1), f"Completed {pdf_idx}/{len(pdfs)}")
+
             if failures:
                 self._log(f"Done with {failures} failure(s).")
+                self._set_progress(total_pages, max(total_pages, 1), f"Done — {failures} failure(s)")
             else:
                 self._log("Done.")
+                self._set_progress(total_pages, max(total_pages, 1), "Done")
         except Exception:
             self._log("Unexpected error:\n" + traceback.format_exc())
+            self._set_progress(0, 1, "Error — see log")
         finally:
             self.root.after(0, self._reset_convert_button)
+
+    def _set_progress(self, current: float, maximum: float, status: str) -> None:
+        def apply() -> None:
+            self.progress_bar.configure(maximum=maximum)
+            self.progress_var.set(current)
+            self.progress_label.configure(text=status)
+
+        self.root.after(0, apply)
 
     def _reset_convert_button(self) -> None:
         self.convert_btn.configure(state="normal", text="Convert")

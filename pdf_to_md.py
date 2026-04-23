@@ -199,10 +199,11 @@ def refine_markdown(config: LLMConfig, page_md: str, page_num: int) -> str:
         return page_md
 
 
-def convert_pdf(pdf_path: Path, config: LLMConfig) -> str:
+def convert_pdf(pdf_path: Path, config: LLMConfig, on_page=None) -> str:
     import fitz  # PyMuPDF
 
     doc = fitz.open(pdf_path)
+    total = doc.page_count
     full_output: list[str] = []
 
     for idx, page in enumerate(doc, start=1):
@@ -216,6 +217,9 @@ def convert_pdf(pdf_path: Path, config: LLMConfig) -> str:
         page_md = refine_markdown(config, page_md, idx)
         full_output.append(f"<!-- Page {idx} -->\n\n{page_md}".strip())
 
+        if on_page is not None:
+            on_page(idx, total)
+
     return "\n\n---\n\n".join(full_output).strip() + "\n"
 
 
@@ -223,19 +227,24 @@ def main() -> int:
     load_dotenv()
 
     parser = argparse.ArgumentParser(description="Convert a PDF into readable Markdown with optional LLM post-processing.")
-    parser.add_argument("pdf_path", type=Path, help="Path to the source PDF file")
-    parser.add_argument("-o", "--output", type=Path, help="Output markdown file path (default: same name with .md)")
+    parser.add_argument("pdf_path", type=Path, nargs="?", help="Path to the source PDF file. If omitted, all PDFs in ./input are processed into ./output.")
+    parser.add_argument("-o", "--output", type=Path, help="Output markdown file path (default: same name with .md). Ignored in batch mode.")
+    parser.add_argument("--input-dir", type=Path, default=Path("input"), help="Batch-mode input directory (default: ./input)")
+    parser.add_argument("--output-dir", type=Path, default=Path("output"), help="Batch-mode output directory (default: ./output)")
     parser.add_argument("--config", type=Path, help="Path to TOML config file")
     parser.add_argument("--no-llm", action="store_true", help="Disable LLM calls (for offline extraction)")
     args = parser.parse_args()
 
-    if not args.pdf_path.exists():
-        print(f"Error: file not found: {args.pdf_path}", file=sys.stderr)
-        return 1
-
     cfg = load_config(args.config)
     if args.no_llm:
         cfg.enabled = False
+
+    if args.pdf_path is None:
+        return run_batch(args.input_dir, args.output_dir, cfg)
+
+    if not args.pdf_path.exists():
+        print(f"Error: file not found: {args.pdf_path}", file=sys.stderr)
+        return 1
 
     out_path = args.output or args.pdf_path.with_suffix(".md")
 
@@ -248,6 +257,33 @@ def main() -> int:
     out_path.write_text(markdown, encoding="utf-8")
     print(f"Saved markdown to: {out_path}")
     return 0
+
+
+def run_batch(input_dir: Path, output_dir: Path, cfg: LLMConfig) -> int:
+    if not input_dir.is_dir():
+        print(f"Error: input directory not found: {input_dir}", file=sys.stderr)
+        return 1
+
+    pdfs = sorted(p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+    if not pdfs:
+        print(f"No PDFs found in {input_dir}", file=sys.stderr)
+        return 1
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    failures = 0
+    for pdf in pdfs:
+        out_path = output_dir / (pdf.stem + ".md")
+        print(f"Converting {pdf} -> {out_path}")
+        try:
+            markdown = convert_pdf(pdf, cfg)
+        except Exception as exc:
+            print(f"  Failed: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        out_path.write_text(markdown, encoding="utf-8")
+
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
