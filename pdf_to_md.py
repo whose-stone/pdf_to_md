@@ -19,6 +19,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
+from dotenv import load_dotenv
+
 
 @dataclass
 class LLMConfig:
@@ -30,6 +32,7 @@ class LLMConfig:
     enabled: bool = True
     describe_images: bool = True
     postprocess_layout: bool = True
+    max_concurrency: int = 5
 
 
 def default_config_path() -> Path:
@@ -45,14 +48,14 @@ def load_config(path: Path | None) -> LLMConfig:
         return LLMConfig(
             model=os.environ.get("PDF_TO_MD_MODEL", "gpt-4.1-mini"),
             base_url=os.environ.get("PDF_TO_MD_BASE_URL", "https://api.openai.com/v1"),
-            api_key=os.environ.get("OPENAI_API_KEY"),
+            api_key=os.environ.get("LLM_API_KEY"),
         )
 
     with cfg_path.open("rb") as f:
         data = tomllib.load(f)
 
     llm = data.get("llm", {})
-    api_key_env = llm.get("api_key_env", "OPENAI_API_KEY")
+    api_key_env = llm.get("api_key_env", "LLM_API_KEY")
     return LLMConfig(
         model=llm.get("model", os.environ.get("PDF_TO_MD_MODEL", "gpt-4.1-mini")),
         base_url=llm.get("base_url", os.environ.get("PDF_TO_MD_BASE_URL", "https://api.openai.com/v1")),
@@ -62,10 +65,40 @@ def load_config(path: Path | None) -> LLMConfig:
         enabled=bool(llm.get("enabled", True)),
         describe_images=bool(llm.get("describe_images", True)),
         postprocess_layout=bool(llm.get("postprocess_layout", True)),
+        max_concurrency=int(llm.get("max_concurrency", 5)),
     )
 
 
-def chat_completion(config: LLMConfig, messages: list[dict[str, Any]], max_tokens: int | None = None) -> str:
+def _build_session(max_workers: int):
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    retry = Retry(
+        total=5,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["POST"]),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(
+        pool_connections=max_workers,
+        pool_maxsize=max_workers,
+        max_retries=retry,
+    )
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def chat_completion(
+    config: LLMConfig,
+    messages: list[dict[str, Any]],
+    max_tokens: int | None = None,
+    session=None,
+) -> str:
     import requests
     if not config.enabled:
         raise RuntimeError("LLM is disabled in config.")
@@ -85,7 +118,8 @@ def chat_completion(config: LLMConfig, messages: list[dict[str, Any]], max_token
         headers["Authorization"] = f"Bearer {config.api_key}"
 
     endpoint = config.base_url.rstrip("/") + "/chat/completions"
-    response = requests.post(endpoint, json=payload, headers=headers, timeout=90)
+    poster = session.post if session is not None else requests.post
+    response = poster(endpoint, json=payload, headers=headers, timeout=90)
     response.raise_for_status()
     data = response.json()
     return data["choices"][0]["message"]["content"].strip()
@@ -152,7 +186,13 @@ def extract_page_markdown(page: Any) -> tuple[str, list[bytes]]:
     return markdown.strip(), images
 
 
-def describe_image(config: LLMConfig, img_data: bytes, page_num: int, image_num: int) -> str:
+def describe_image(
+    config: LLMConfig,
+    img_data: bytes,
+    page_num: int,
+    image_num: int,
+    session=None,
+) -> str:
     if not config.enabled or not config.describe_images:
         return f"![Image {image_num} on page {page_num}](Image description disabled)"
 
@@ -172,13 +212,13 @@ def describe_image(config: LLMConfig, img_data: bytes, page_num: int, image_num:
     ]
 
     try:
-        description = chat_completion(config, messages, max_tokens=180)
+        description = chat_completion(config, messages, max_tokens=180, session=session)
         return f"![Image {image_num} on page {page_num}]({description})"
     except Exception as exc:
         return f"![Image {image_num} on page {page_num}](Unable to describe image: {exc})"
 
 
-def refine_markdown(config: LLMConfig, page_md: str, page_num: int) -> str:
+def refine_markdown(config: LLMConfig, page_md: str, page_num: int, session=None) -> str:
     if not config.enabled or not config.postprocess_layout:
         return page_md
 
@@ -192,46 +232,88 @@ def refine_markdown(config: LLMConfig, page_md: str, page_num: int) -> str:
         {"role": "user", "content": f"Page {page_num} raw markdown:\n\n{page_md}"},
     ]
     try:
-        return chat_completion(config, messages)
+        return chat_completion(config, messages, session=session)
     except Exception:
         return page_md
 
 
-def convert_pdf(pdf_path: Path, config: LLMConfig) -> str:
+def convert_pdf(pdf_path: Path, config: LLMConfig, on_page=None) -> str:
     import fitz  # PyMuPDF
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     doc = fitz.open(pdf_path)
-    full_output: list[str] = []
+    total = doc.page_count
 
+    # PyMuPDF is not thread-safe; extract on the main thread up front.
+    # Local work is cheap — the bottleneck is the LLM calls below.
+    page_inputs: list[tuple[int, str, list[bytes]]] = []
     for idx, page in enumerate(doc, start=1):
         page_md, images = extract_page_markdown(page)
+        page_inputs.append((idx, page_md, images))
+    doc.close()
 
+    if total == 0:
+        return ""
+
+    max_workers = max(1, min(int(config.max_concurrency or 1), total))
+    session = _build_session(max_workers)
+
+    def process(idx: int, page_md: str, images: list[bytes]) -> tuple[int, str]:
         for image_idx, img in enumerate(images, start=1):
             placeholder = "[[IMAGE_PLACEHOLDER]]"
             if placeholder in page_md:
-                page_md = page_md.replace(placeholder, describe_image(config, img, idx, image_idx), 1)
+                page_md = page_md.replace(
+                    placeholder,
+                    describe_image(config, img, idx, image_idx, session=session),
+                    1,
+                )
+        page_md = refine_markdown(config, page_md, idx, session=session)
+        return idx, f"<!-- Page {idx} -->\n\n{page_md}".strip()
 
-        page_md = refine_markdown(config, page_md, idx)
-        full_output.append(f"<!-- Page {idx} -->\n\n{page_md}".strip())
+    results: dict[int, str] = {}
+    completed = 0
+    lock = threading.Lock()
 
-    return "\n\n---\n\n".join(full_output).strip() + "\n"
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(process, *args) for args in page_inputs]
+            for fut in as_completed(futures):
+                idx, md = fut.result()
+                results[idx] = md
+                with lock:
+                    completed += 1
+                    if on_page is not None:
+                        on_page(completed, total)
+    finally:
+        session.close()
+
+    ordered = [results[i] for i in range(1, total + 1)]
+    return "\n\n---\n\n".join(ordered).strip() + "\n"
 
 
 def main() -> int:
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Convert a PDF into readable Markdown with optional LLM post-processing.")
-    parser.add_argument("pdf_path", type=Path, help="Path to the source PDF file")
-    parser.add_argument("-o", "--output", type=Path, help="Output markdown file path (default: same name with .md)")
+    parser.add_argument("pdf_path", type=Path, nargs="?", help="Path to the source PDF file. If omitted, all PDFs in ./input are processed into ./output.")
+    parser.add_argument("-o", "--output", type=Path, help="Output markdown file path (default: same name with .md). Ignored in batch mode.")
+    parser.add_argument("--input-dir", type=Path, default=Path("input"), help="Batch-mode input directory (default: ./input)")
+    parser.add_argument("--output-dir", type=Path, default=Path("output"), help="Batch-mode output directory (default: ./output)")
     parser.add_argument("--config", type=Path, help="Path to TOML config file")
     parser.add_argument("--no-llm", action="store_true", help="Disable LLM calls (for offline extraction)")
     args = parser.parse_args()
 
-    if not args.pdf_path.exists():
-        print(f"Error: file not found: {args.pdf_path}", file=sys.stderr)
-        return 1
-
     cfg = load_config(args.config)
     if args.no_llm:
         cfg.enabled = False
+
+    if args.pdf_path is None:
+        return run_batch(args.input_dir, args.output_dir, cfg)
+
+    if not args.pdf_path.exists():
+        print(f"Error: file not found: {args.pdf_path}", file=sys.stderr)
+        return 1
 
     out_path = args.output or args.pdf_path.with_suffix(".md")
 
@@ -244,6 +326,33 @@ def main() -> int:
     out_path.write_text(markdown, encoding="utf-8")
     print(f"Saved markdown to: {out_path}")
     return 0
+
+
+def run_batch(input_dir: Path, output_dir: Path, cfg: LLMConfig) -> int:
+    if not input_dir.is_dir():
+        print(f"Error: input directory not found: {input_dir}", file=sys.stderr)
+        return 1
+
+    pdfs = sorted(p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+    if not pdfs:
+        print(f"No PDFs found in {input_dir}", file=sys.stderr)
+        return 1
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    failures = 0
+    for pdf in pdfs:
+        out_path = output_dir / (pdf.stem + ".md")
+        print(f"Converting {pdf} -> {out_path}")
+        try:
+            markdown = convert_pdf(pdf, cfg)
+        except Exception as exc:
+            print(f"  Failed: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        out_path.write_text(markdown, encoding="utf-8")
+
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
